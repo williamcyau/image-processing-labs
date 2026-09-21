@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rectangular Grating Diffraction Simulator</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1b1e23; --muted:#5d646e;
+    --line:#d8dce2; --accent:#2f6fdd;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  header{padding:14px 18px;background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:17px;font-weight:600}
+  header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+  #app{display:flex;gap:14px;padding:14px;align-items:flex-start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+  #controls{flex:0 0 300px}
+  #cross,#plot{flex:1 1 0;min-width:0;text-align:center}
+  .panel h2{margin:0 0 10px;font-size:13px;font-weight:600;text-transform:uppercase;
+            letter-spacing:.05em;color:var(--muted)}
+  .knob{margin-bottom:11px}
+  .knob .row{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .knob label{font-size:12.5px}
+  .knob .val{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--accent);font-weight:600}
+  .knob input[type=range]{width:100%;margin:3px 0 0;accent-color:var(--accent)}
+  .group{border-top:1px solid var(--line);margin:14px 0 10px;padding-top:10px}
+  .group:first-of-type{border-top:none;margin-top:0;padding-top:0}
+  .group h3{margin:0 0 8px;font-size:11.5px;font-weight:600;color:var(--muted);
+            text-transform:uppercase;letter-spacing:.04em}
+  .note{font-size:11.5px;color:var(--muted);margin:6px 0 0}
+  img{max-width:100%;height:auto;display:block;margin:0 auto}
+  .btns{display:flex;gap:8px;margin-top:12px}
+  button{flex:1;padding:7px 10px;font-size:12.5px;border:1px solid var(--line);
+         background:#fff;border-radius:6px;cursor:pointer;color:var(--ink)}
+  button:hover{background:#eef2f8;border-color:var(--accent)}
+  #status{padding:10px 18px;color:var(--muted);font-size:13px}
+  @media (max-width:1150px){ #app{flex-wrap:wrap} #controls{flex:0 0 100%} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Rectangular Grating Diffraction Simulator</h1>
+  <p>Move a slider and both pictures redraw. The math runs in Python with NumPy. The pictures are drawn with Matplotlib.</p>
+</header>
+
+<div id="status">Loading Python, NumPy, and Matplotlib. This takes about 15 seconds the first time.</div>
+
+<div id="app" style="display:none">
+  <div class="panel" id="controls">
+    <h2>Parameters</h2>
+    <div id="knobs"></div>
+    <div class="btns">
+      <button id="hold">Hold curve</button>
+      <button id="clear">Clear held</button>
+    </div>
+    <button id="reset" style="margin-top:8px;width:100%">Reset all</button>
+    <p class="note">Only the period, the wavelength, and the incidence angle move the peaks.
+       The other knobs change peak heights by a small amount, as requested.</p>
+  </div>
+
+  <div class="panel" id="cross">
+    <h2>Grating cross-section</h2>
+    <img id="imgCross" alt="Cross-section of the grating">
+  </div>
+
+  <div class="panel" id="plot">
+    <h2>Diffracted intensity</h2>
+    <img id="imgPlot" alt="Intensity versus diffraction angle">
+  </div>
+</div>
+
+<!-- ===================== Python model ===================== -->
+<script type="text/python" id="pycode">
+import json, io, base64
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# Number of grooves lit by the beam. It sets how narrow the peaks are.
+N_GROOVES = 40
+# How much the secondary knobs are allowed to move peak heights (0 = not at all).
+W_SHAPE = 0.15
+# Roughness is drawn larger than life so it can be seen.
+ROUGH_DRAW_GAIN = 6.0
+
+RNG = np.random.default_rng(7)
+
+fig_x = plt.figure(figsize=(5.2, 4.7), dpi=100)
+ax_x = fig_x.add_subplot(111)
+fig_x.subplots_adjust(left=0.15, right=0.97, top=0.86, bottom=0.11)
+
+fig_p = plt.figure(figsize=(6.2, 4.7), dpi=100)
+ax_p = fig_p.add_subplot(111)
+fig_p.subplots_adjust(left=0.12, right=0.97, top=0.87, bottom=0.24)
+
+_last = None   # (theta, I, label) of the curve drawn most recently
+_held = None   # (theta, I, label) of the curve the user asked to keep
+
+
+def _png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor="white",
+                pil_kwargs={"compress_level": 1})
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def orders(d, lam, ti_deg):
+    """Grating equation d*(sin b_m - sin b_i) = m*lam.
+
+    Returns the order numbers that propagate and their sines.
+    """
+    si = np.sin(np.radians(ti_deg))
+    M = int(np.floor(2.0 * d / lam)) + 2
+    m = np.arange(-M, M + 1)
+    sm = si + m * lam / d
+    ok = np.abs(sm) < 0.99999
+    return m[ok], sm[ok], si
+
+
+def amplitudes(m, sm, p):
+    """Relative power in each order.
+
+    The heights come mostly from a flat baseline. The shape term from the
+    thin phase grating is mixed in with a small weight, so duty cycle,
+    groove depth, sidewall angle and roughness only nudge the curve.
+    """
+    f = p["duty"]
+    lam = p["lam"]          # um
+    d = p["period"]         # um
+    h = p["depth"] / 1000.0  # nm -> um
+    phi = 2.0 * np.pi * (p["nsub"] - 1.0) * h / lam
+
+    # Fourier coefficients of a binary phase profile.
+    c = f * np.sinc(m * f) * (np.exp(1j * phi) - 1.0)
+    c = np.where(m == 0, f * np.exp(1j * phi) + (1.0 - f), c)
+    shape = np.abs(c) ** 2
+    if shape.max() > 0:
+        shape = shape / shape.max()
+
+    # Slanted sidewalls push a little power to one side, like a blaze.
+    tilt = 1.0 + 0.6 * np.tan(np.radians(p["swa"])) * (m * lam / d)
+    tilt = np.clip(tilt, 0.4, 1.6)
+
+    a = ((1.0 - W_SHAPE) + W_SHAPE * shape) * tilt
+
+    # Roughness scatters a little light out of the orders (Debye-Waller).
+    dw = float(np.exp(-((2.0 * np.pi * (p["rough"] / 1000.0) / lam) ** 2) * 0.25))
+
+    # Light leaving near grazing spreads out, so orders there are dimmer.
+    a = a * dw * np.clip(1.0 - sm ** 2, 0.0, 1.0) ** 0.25
+    return a, dw
+
+
+def curve(p):
+    d, lam = p["period"], p["lam"]
+    m, sm, si = orders(d, lam, p["ti"])
+    a, dw = amplitudes(m, sm, p)
+
+    # True peak width in sin(angle) is lam/(N*d). A floor keeps it drawable.
+    # The floor also stays under a quarter of the order spacing, so crowded
+    # orders never merge into one blur.
+    floor = min(0.008, 0.25 * lam / d)
+    fw = max(lam / (N_GROOVES * d), floor) * (1.0 + 0.15 * p["rough"] / 30.0)
+    sig = fw / 2.3548
+
+    # Enough samples to put about six points across each peak.
+    npts = int(np.clip(34.0 / fw, 4000, 20000))
+    theta = np.linspace(-89.5, 89.5, npts)
+    s = np.sin(np.radians(theta))
+
+    I = np.zeros_like(s)
+    for ai, smi in zip(a, sm):
+        I += ai * np.exp(-0.5 * ((s - smi) / sig) ** 2)
+
+    # Light lost to roughness comes back as a wide, faint background.
+    I += (1.0 - dw) * 0.06 * np.sqrt(np.clip(1.0 - s ** 2, 0, 1)) + 0.002
+    I = I / I.max()
+
+    ang = np.degrees(np.arcsin(np.clip(sm, -1, 1)))
+    return theta, I, m, ang, a / a.max()
+
+
+def draw_cross(p):
+    ax = ax_x
+    ax.clear()
+    d = p["period"]
+    f = p["duty"]
+    h = p["depth"] / 1000.0
+    t = p["tsub"]
+    a = np.radians(p["swa"])
+    rough = p["rough"] / 1000.0 * ROUGH_DRAW_GAIN
+
+    nper = 4
+    W = nper * d
+
+    # Keep the substrate from swallowing the picture.
+    tdraw = min(t, max(2.0 * h, 0.35 * W))
+    truncated = tdraw < 0.9 * t
+
+    ax.add_patch(plt.Rectangle((0, -tdraw), W, tdraw, facecolor="#b9c4d4",
+                               edgecolor="#6d7889", linewidth=1.2))
+
+    hb = f * d / 2.0                       # half width at the base
+    ht = max(hb - h * np.tan(a), 0.02 * d)  # half width at the top
+    ny = 24
+    yy = np.linspace(0, h, ny)
+    for k in range(nper):
+        xc = (k + 0.5) * d
+        xl = xc - np.interp(yy, [0, h], [hb, ht])
+        xr = xc + np.interp(yy, [0, h], [hb, ht])
+        sd = min(rough, 0.10 * hb)
+        if sd > 0 and h > 0:
+            xl = xl + RNG.normal(0, sd, ny)
+            xr = xr + RNG.normal(0, sd, ny)
+        poly = np.concatenate([np.column_stack([xl, yy]),
+                               np.column_stack([xr[::-1], yy[::-1]])])
+        ax.add_patch(plt.Polygon(poly, closed=True, facecolor="#8fa6c6",
+                                 edgecolor="#41506a", linewidth=1.2))
+
+    # Incoming ray, drawn from the incidence angle off the surface normal.
+    L = 0.5 * d
+    ti = np.radians(p["ti"])
+    x0 = 3.5 * d   # over the last ridge, clear of the period marker
+    ax.annotate("", xy=(x0, h),
+                xytext=(x0 - np.sin(ti) * L * 1.6, h + np.cos(ti) * L * 1.6),
+                arrowprops=dict(arrowstyle="-|>", color="#d9534f", lw=2))
+    ax.text(x0 - np.sin(ti) * L * 1.75, h + np.cos(ti) * L * 1.75,
+            "incident %.0f deg " % p["ti"], color="#d9534f", fontsize=8.5,
+            ha="right" if p["ti"] >= 0 else "left", va="center")
+
+    # A few outgoing orders, for orientation only.
+    mm, sm, _ = orders(d, p["lam"], p["ti"])
+    keep = np.abs(mm) <= 3
+    for smi in sm[keep]:
+        b = np.arcsin(smi)
+        ax.annotate("", xy=(x0 + np.sin(b) * L * 1.5, -tdraw - np.cos(b) * L * 1.5),
+                    xytext=(x0, -tdraw),
+                    arrowprops=dict(arrowstyle="-|>", color="#2f6fdd", lw=1.1, alpha=.75))
+
+    # Period marker.
+    ymark = h + 0.95 * L
+    ax.annotate("", xy=(0.5 * d, ymark), xytext=(1.5 * d, ymark),
+                arrowprops=dict(arrowstyle="<->", color="#1b1e23", lw=1))
+    ax.text(d, ymark, "period %.3f um" % d, ha="center", va="bottom", fontsize=8.5)
+
+    ax.set_xlim(-0.05 * W, 1.05 * W)
+    top = h + 2.6 * L
+    ax.set_ylim(-tdraw * 1.9 - 0.05 * W, top)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x (um)")
+    ax.set_ylabel("height (um)")
+    sub = "substrate %.2f um" % t + (" (drawn cut off)" if truncated else "")
+    ax.set_title("Duty cycle %.2f, depth %.0f nm, wall %+.0f deg\n%s, roughness %.0f nm "
+                 "(shown %dx)" % (f, p["depth"], p["swa"], sub, p["rough"], int(ROUGH_DRAW_GAIN)),
+                 fontsize=9.5)
+    ax.tick_params(labelsize=8)
+    return _png(fig_x)
+
+
+def draw_plot(p):
+    global _last
+    theta, I, m, ang, arel = curve(p)
+    label = "d=%.2f um, lam=%.0f nm, in=%.0f deg" % (p["period"], p["lam"] * 1000, p["ti"])
+    _last = (theta, I, label)
+
+    ax = ax_p
+    ax.clear()
+
+    if _held is not None:
+        ax.plot(_held[0], _held[1], lw=1.4, ls="--", color="#9aa2ad",
+                label="held: " + _held[2])
+
+    ax.plot(theta, I, lw=1.6, color="#2f6fdd", label="now: " + label)
+
+    ax.vlines(ang, 0, 1.10, color="#c8ccd3", lw=0.7, ls=":", zorder=0)
+    # Label a subset of the orders so the numbers do not overlap.
+    # The count is anchored on order 0, so order 0 is always labelled.
+    step = max(1, int(np.ceil(len(m) / 15.0)))
+    for mi, aa in zip(m, ang):
+        if mi % step == 0 and -89 < aa < 89:
+            ax.text(aa, 1.02, "%+d" % mi if mi else "0", ha="center", va="bottom",
+                    fontsize=7.5, color="#5d646e")
+
+    ax.set_xlim(-90, 90)
+    ax.set_ylim(0, 1.10)
+    ax.set_xticks(range(-90, 91, 30))
+    ax.set_xlabel("Diffraction angle (degrees, from the surface normal)")
+    ax.set_ylabel("Relative intensity (peak = 1)")
+    ax.set_title("Intensity vs diffraction angle    (numbers = order m)\n"
+                 "dotted lines: grating equation  "
+                 "d(sin$\\theta_m$ - sin$\\theta_i$) = m$\\lambda$", fontsize=10)
+    ax.grid(alpha=.25, lw=.6)
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.155),
+              frameon=False, handlelength=2.2)
+    ax.tick_params(labelsize=8)
+    return _png(fig_p)
+
+
+def render(pjson):
+    p = json.loads(pjson)
+    p["lam"] = p["lam_nm"] / 1000.0   # nm -> um
+    return json.dumps({"cross": draw_cross(p), "plot": draw_plot(p)})
+
+
+def hold():
+    global _held
+    _held = _last
+    return ""
+
+
+def clear_hold():
+    global _held
+    _held = None
+    return ""
+</script>
+
+<!-- ===================== Page logic ===================== -->
+<script src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
+<script>
+const KNOBS = [
+  {g:"Sets where the peaks are"},
+  {k:"period", label:"Grating period", unit:"um",  min:0.2, max:20,  step:0.01, def:2.0,  dp:2},
+  {k:"lam_nm", label:"Source wavelength", unit:"nm", min:200, max:1200, step:1,  def:550,  dp:0},
+  {k:"ti",     label:"Incidence angle", unit:"deg", min:-80, max:80, step:0.5,  def:0,    dp:1},
+  {g:"Barely changes the curve"},
+  {k:"duty",  label:"Duty cycle", unit:"",      min:0.05, max:0.95, step:0.01, def:0.50, dp:2},
+  {k:"depth", label:"Groove thickness", unit:"nm", min:0, max:2000, step:10,  def:400,  dp:0},
+  {k:"tsub",  label:"Substrate thickness", unit:"um", min:0.2, max:20, step:0.1, def:2.0, dp:1},
+  {k:"swa",   label:"Sidewall angle", unit:"deg", min:-20, max:20, step:0.5,  def:0,    dp:1},
+  {k:"rough", label:"Sidewall roughness", unit:"nm", min:0, max:30, step:0.5,  def:0,    dp:1},
+  {k:"nsub",  label:"Refractive index", unit:"",  min:1.0, max:2.5, step:0.01, def:1.50, dp:2},
+];
+
+const knobsEl = document.getElementById("knobs");
+const inputs = {};
+for (const it of KNOBS) {
+  if (it.g) {
+    const g = document.createElement("div");
+    g.className = "group";
+    g.innerHTML = "<h3>" + it.g + "</h3>";
+    knobsEl.appendChild(g);
+    continue;
+  }
+  const d = document.createElement("div");
+  d.className = "knob";
+  d.innerHTML =
+    '<div class="row"><label for="' + it.k + '">' + it.label + '</label>' +
+    '<span class="val" id="v_' + it.k + '"></span></div>' +
+    '<input type="range" id="' + it.k + '" min="' + it.min + '" max="' + it.max +
+    '" step="' + it.step + '" value="' + it.def + '">';
+  knobsEl.appendChild(d);
+  const inp = d.querySelector("input");
+  inputs[it.k] = inp;
+  const show = () => {
+    document.getElementById("v_" + it.k).textContent =
+      Number(inp.value).toFixed(it.dp) + (it.unit ? " " + it.unit : "");
+  };
+  show();
+  inp.addEventListener("input", () => { show(); schedule(); });
+}
+
+function params() {
+  const p = {};
+  for (const k in inputs) p[k] = Number(inputs[k].value);
+  return p;
+}
+
+let py = null, busy = false, pending = false;
+
+async function draw() {
+  if (busy) { pending = true; return; }
+  busy = true;
+  try {
+    const out = JSON.parse(py.globals.get("render")(JSON.stringify(params())));
+    document.getElementById("imgCross").src = out.cross;
+    document.getElementById("imgPlot").src = out.plot;
+  } catch (e) {
+    document.getElementById("status").style.display = "block";
+    document.getElementById("status").textContent = "Python error: " + e.message;
+  }
+  busy = false;
+  if (pending) { pending = false; requestAnimationFrame(draw); }
+}
+function schedule() { requestAnimationFrame(draw); }
+
+document.getElementById("hold").onclick  = () => { py.globals.get("hold")(); draw(); };
+document.getElementById("clear").onclick = () => { py.globals.get("clear_hold")(); draw(); };
+document.getElementById("reset").onclick = () => {
+  for (const it of KNOBS) if (it.k) {
+    inputs[it.k].value = it.def;
+    inputs[it.k].dispatchEvent(new Event("input"));
+  }
+};
+
+(async () => {
+  const st = document.getElementById("status");
+  try {
+    py = await loadPyodide();
+    st.textContent = "Loading NumPy and Matplotlib...";
+    await py.loadPackage(["numpy", "matplotlib"]);
+    st.textContent = "Building the model...";
+    py.runPython(document.getElementById("pycode").textContent);
+    document.getElementById("app").style.display = "flex";
+    st.style.display = "none";
+    await draw();
+  } catch (e) {
+    st.textContent = "Startup failed: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>

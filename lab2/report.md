@@ -1,7 +1,8 @@
 # Lab 2 Report
 
-Name: William Yau
-Github repo: 
+Name: William Yau 
+
+Github repo: https://github.com/williamcyau/image-processing-labs.git
 
 ## D1
 
@@ -76,4 +77,6 @@ What `ls -l kodim23.pgm` returns:
 
 This indicates `kodim23.pgm` indeed has `393231` bytes.
 
+## Claude use
 
+I used to Claude to help me convert this markdown file to pdf.
