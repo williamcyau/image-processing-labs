@@ -1,0 +1,17 @@
+D10: Reconstruction Results Summary
+==========================================================================================
+
+Run    Prior   σ_x    Final Cost     RMSE  Time (s)
+ R1 Gaussian 0.036 177570.001546 0.035754 65.174070
+ R2   QGGMRF 0.020 204853.086050 0.029885 64.764359
+ R3   QGGMRF 0.010 249297.160078 0.034329 64.291544
+ R4   QGGMRF 0.040 160403.168278 0.037991 64.483485
+ R5 Gaussian 0.018 227252.296769 0.036785 64.673262
+ R6 Gaussian 0.072 126015.300235 0.049791 63.489698
+
+==========================================================================================
+
+Metrics:
+  Final Cost: MAP cost value at final iteration
+  RMSE: Root Mean Squared Error against x_true in [0,1] units
+  Time (s): Wall clock time for reconstruction (50 iterations)
